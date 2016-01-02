@@ -1,8 +1,13 @@
 package ru.yandex.qatools.allure.ant.junit4;
 
 import java.io.File;
+import java.io.OutputStream;
+import java.nio.file.Files;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Properties;
+
+import static java.nio.file.StandardOpenOption.*;
 
 import org.apache.tools.ant.Project;
 import org.apache.tools.ant.Task;
@@ -86,7 +91,7 @@ public class Junit4Task extends Task {
 		}
 		
 		public String getName() {
-			return name;
+			return prepareClassName((name == null) ? name : name.trim());
 		}
 	}
 	
@@ -117,24 +122,43 @@ public class Junit4Task extends Task {
 		}
 	}
 	
+	public class Listener {
+		private String name;
+		
+		public Listener() {}
+		
+		public void setName(String name) {
+			this.name = name;
+		}
+		
+		public String getName() {
+			return prepareClassName((name == null) ? name : name.trim());
+		}
+	}
+	
 	private static final String launcher = "ru.yandex.qatools.allure.ant.junit4.Junit4Launcher";
-
+	private static final String SEPARATOR = ",";
+	
 	private List<ArgumentHolder> jvmArguments = new LinkedList<>();
 	private List<Variable> sysProperties = new LinkedList<>();
 	private List<PropertySet> sysPropertySets = new LinkedList<>();
 	private List<Path> classpasses = new LinkedList<>();
 	private List<Test> tests = new LinkedList<>();
 	private List<BatchTest> batchTests = new LinkedList<>();
+	private List<Listener> listeners = new LinkedList<>();
 	
 	private boolean fork = false;
 	private Integer timeout = null;
 	private boolean showOutput = false;
 	private boolean newEnvironment = false;
-	private boolean failonerror = false;
-	private boolean haltOnFail  = false;
-	private String listenerName;
+	private boolean failOnError = false;
+	private boolean printSummary = false;
+	private String parallelMode = null;
+	private String poolType = null;
+	private Integer poolThreads = 1;
 	
 	private static String prepareClassName(final String name) {
+		if (name == null || name.isEmpty()) return "";
 		String nameWithOutExt = (name.endsWith(".class")) ?
 			name.substring(0, name.length() - ".class".length()) : name;
 			return nameWithOutExt
@@ -165,17 +189,22 @@ public class Junit4Task extends Task {
 		classpasses.add(path);
 	}
 	
-	public void addTest(Test test) {
-		if (test.getName() == null) return;
-		test.setName(prepareClassName(test.getName().trim()));
-		if (test.getName().isEmpty()) return;
+	public Test createTest() {
+		final Test test = new Test();
 		tests.add(test);
+		return test;
 	}
 	
 	public BatchTest createBatchTest() {
 		final BatchTest test = new BatchTest(getProject());
 		batchTests.add(test);
 		return test;
+	}
+
+	public Listener createListener() {
+		final Listener listener = new Listener();
+		listeners.add(listener);
+		return listener;
 	}
 	
 	public void setTimeout(final Integer value) {
@@ -190,16 +219,24 @@ public class Junit4Task extends Task {
 		this.showOutput = showOutput;
 	}
 	
-	public void setFailonerror(final boolean failonerror) {
-		this.failonerror = failonerror;
+	public void setFailOnError(final boolean failOnError) {
+		this.failOnError = failOnError;
 	}
 	
-	public void setHaltonfailure(final boolean value) {
-		this.haltOnFail = value;
+	public void setPrintSummary(final boolean printSummary) {
+		this.printSummary = printSummary;
 	}
 	
-	public void setListener(String listener) {
-		listenerName = listener;
+	public void setParallelMode(final String parallelMode) {
+		this.parallelMode = parallelMode;
+	}
+	
+	public void setPoolType(final String poolType) {
+		this.poolType = poolType;
+	}
+	
+	public void setPoolThreads(final int poolThreads) {
+		this.poolThreads = poolThreads;
 	}
 	
 	@Override
@@ -217,37 +254,67 @@ public class Junit4Task extends Task {
 		batchTests.forEach(batchTest -> {
 			allTestNames.addAll(batchTest.getNames());
 		});
-		for (String testName : allTestNames) {
-			log("Run test \""+testName+"\"");
-			try {
-				Java javaTask = new Java();
-				javaTask.setNewenvironment(newEnvironment);
-				javaTask.setTaskName("junit4");
-				javaTask.setProject(getProject());
-				javaTask.setFork(fork);
-				javaTask.setFailonerror(failonerror);
-				javaTask.setLogError(showOutput);
-				if (timeout != null) javaTask.setTimeout((long) timeout);
-				javaTask.setClassname(launcher);
-				jvmArguments.forEach(argumentHolder -> {
-					Argument jvmArgs = javaTask.createJvmarg();
-					argumentHolder.copyToArgument(jvmArgs);
-				});
-				sysProperties.forEach(sysProperty -> {
-					javaTask.addSysproperty(sysProperty);
-				});
-				sysPropertySets.forEach(sysPropertySet -> {
-					javaTask.addSyspropertyset(sysPropertySet);
-				});
-				Argument taskArgs = javaTask.createArg();
-				taskArgs.setLine(testName+" "+listenerName);
-				if (classpath.size() > 0) javaTask.setClasspath(classpath);
-				javaTask.init();
-				int code = javaTask.executeJava();
-				if (haltOnFail && code != 0) break;
-			} catch (Exception e) {
-				log("Error "+e);
-			}
+		StringBuilder testSb = new StringBuilder();
+		allTestNames.forEach(name -> {
+			testSb.append(name).append(SEPARATOR);
+		});
+		String testCases = testSb.toString();
+		testCases = testCases.endsWith(SEPARATOR) ?
+				testCases.substring(0, testCases.length()-1) : testCases;
+		Properties conf = new Properties();
+		conf.setProperty("testclasses", testCases);
+		List<String> allListenerNames = new LinkedList<>();
+		listeners.forEach(test -> {
+			allListenerNames.add(test.getName());
+		});
+		StringBuilder listenerSb = new StringBuilder();
+		allListenerNames.forEach(name -> {
+			listenerSb.append(name).append(SEPARATOR);
+		});
+		String listeners = listenerSb.toString();
+		listeners = listeners.endsWith(SEPARATOR) ?
+			listeners.substring(0, listeners.length()-1) : listeners;
+		if (!allListenerNames.isEmpty())
+			conf.setProperty("listeners", listeners);
+		conf.setProperty("printsummary", printSummary ? "true" : "false");
+		if (parallelMode != null)
+			conf.setProperty("parallelmode", parallelMode);
+		if (poolType != null) {
+			conf.setProperty("pool.type", poolType);
+			conf.setProperty("pool.threads", poolThreads.toString());
+		}
+		try (OutputStream os = Files.newOutputStream(
+				java.nio.file.Paths.get("junit4.properties"), CREATE)) {
+			conf.store(os, null);
+			log("Run JUnit tests");
+			Java javaTask = new Java();
+			javaTask.setNewenvironment(newEnvironment);
+			javaTask.setTaskName("junit4");
+			javaTask.setProject(getProject());
+			javaTask.setFork(fork);
+			javaTask.setFailonerror(failOnError);
+			javaTask.setLogError(showOutput);
+			if (timeout != null) javaTask.setTimeout((long) timeout);
+			javaTask.setClassname(launcher);
+			jvmArguments.forEach(argumentHolder -> {
+				Argument jvmArgs = javaTask.createJvmarg();
+				argumentHolder.copyToArgument(jvmArgs);
+			});
+			sysProperties.forEach(sysProperty -> {
+				javaTask.addSysproperty(sysProperty);
+			});
+			sysPropertySets.forEach(sysPropertySet -> {
+				javaTask.addSyspropertyset(sysPropertySet);
+			});
+			Argument taskArgs = javaTask.createArg();
+			taskArgs.setLine("junit4.properties");
+			if (classpath.size() > 0) javaTask.setClasspath(classpath);
+			javaTask.init();
+			javaTask.executeJava();
+			java.nio.file.Path path = java.nio.file.Paths.get("junit4.properties");
+			if (Files.exists(path)) Files.delete(path);
+		} catch (Exception e) {
+			log("Error "+e);
 		}
 	}
 }
